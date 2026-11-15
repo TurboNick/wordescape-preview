@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Preview</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; font: 18px/1.5 system-ui, sans-serif; background: #f6f2ea; color: #1d2b2a; }
+  main { width: min(90vw, 26rem); padding: 1.5rem; }
+  h1 { font-size: 1.4rem; margin: 0 0 .5rem; }
+  label { display: block; margin: 1rem 0 .35rem; }
+  input { box-sizing: border-box; width: 100%; font: inherit; padding: .7rem .8rem; border: 2px solid #1d6a66; border-radius: .5rem; background: #fff; color: inherit; }
+  button { font: inherit; margin-top: 1rem; padding: .7rem 1.2rem; border: 0; border-radius: .5rem; background: #1d6a66; color: #fff; }
+  button:disabled { opacity: .6; }
+  #msg { min-height: 1.5em; margin-top: 1rem; }
+  #forget { display: inline-block; margin-top: 1.5rem; font-size: .9rem; color: inherit; }
+  @media (prefers-color-scheme: dark) { body { background: #14201f; color: #e8f1ef; } input { background: #0e1716; border-color: #5fb8b2; } button { background: #5fb8b2; color: #0e1716; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Private preview</h1>
+  <p>This is a test build, not a released game. Enter the phrase you were given.</p>
+  <form id="form">
+    <label for="phrase">Phrase</label>
+    <input id="phrase" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" required>
+    <button id="go" type="submit">Unlock</button>
+  </form>
+  <p id="msg" role="status"></p>
+  <a id="forget" href="#" hidden>Forget the phrase on this device</a>
+</main>
+<script>
+const DB = 'preview-key', STORE = 'k';
+const msg = document.getElementById('msg'), go = document.getElementById('go');
+const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+function db() {
+  return new Promise((res, rej) => {
+    const o = indexedDB.open(DB, 1);
+    o.onupgradeneeded = () => o.result.createObjectStore(STORE);
+    o.onsuccess = () => res(o.result); o.onerror = () => rej(o.error);
+  });
+}
+async function idb(mode, fn) {
+  const d = await db();
+  return new Promise((res, rej) => { const r = fn(d.transaction(STORE, mode).objectStore(STORE)); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+}
+async function opens(key, meta) {
+  try { const c = b64(meta.check); await crypto.subtle.decrypt({ name: 'AES-GCM', iv: c.subarray(0, 12), additionalData: new TextEncoder().encode('check') }, key, c.subarray(12)); return true; } catch (_) { return false; }
+}
+async function start() {
+  const reg = await navigator.serviceWorker.register('sw.js');
+  await navigator.serviceWorker.ready;
+  if (!navigator.serviceWorker.controller) {
+    await new Promise((res) => { navigator.serviceWorker.addEventListener('controllerchange', res, { once: true }); setTimeout(res, 3000); });
+  }
+  if (!navigator.serviceWorker.controller) { location.reload(); return; }
+  location.href = 'play/';
+}
+(async () => {
+  if (!('serviceWorker' in navigator) || !window.crypto || !crypto.subtle || !window.indexedDB) {
+    msg.textContent = 'This browser cannot open the preview here. Try a normal (not private) window in Chrome, Safari or Firefox.';
+    go.disabled = true; return;
+  }
+  const meta = await (await fetch('enc/meta.json', { cache: 'no-cache' })).json();
+  let saved = null;
+  try { saved = await idb('readonly', (s) => s.get('key')); } catch (_) {}
+  if (saved && await opens(saved, meta)) {
+    document.getElementById('forget').hidden = false;
+    if (location.hash !== '#locked' && location.hash !== '#stay') { msg.textContent = 'Opening…'; start(); return; }
+  } else if (saved) { try { await idb('readwrite', (s) => s.delete('key')); } catch (_) {} msg.textContent = 'The preview was updated with a new phrase.'; }
+  document.getElementById('forget').addEventListener('click', async (e) => {
+    e.preventDefault();
+    try { await idb('readwrite', (s) => s.delete('key')); } catch (_) {}
+    e.target.hidden = true; msg.textContent = 'Forgotten on this device.';
+  });
+  document.getElementById('form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    go.disabled = true; msg.textContent = 'Checking…';
+    const phrase = document.getElementById('phrase').value.toLowerCase().trim().split(/\s+/).join(' ');
+    try {
+      const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(phrase), 'PBKDF2', false, ['deriveKey']);
+      const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt: b64(meta.salt), iterations: meta.iterations }, base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+      if (!(await opens(key, meta))) { msg.textContent = 'That phrase did not unlock it.'; go.disabled = false; return; }
+      await idb('readwrite', (s) => s.put(key, 'key'));
+      msg.textContent = 'Opening…';
+      await start();
+    } catch (err) { msg.textContent = 'Could not open the preview: ' + err; go.disabled = false; }
+  });
+})();
+</script>
+</body>
+</html>
